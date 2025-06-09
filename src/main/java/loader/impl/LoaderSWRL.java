@@ -65,14 +65,18 @@ public class LoaderSWRL extends LoaderManager {
                 String prop = propAtom.getPredicate().asOWLObjectProperty().getIRI().getIRIString();
                 SWRLArgument argDom = propAtom.getFirstArgument();
                 String dom = extractIRI(argDom);
+                String typedomain = (argDom instanceof SWRLVariable) ? "var" : "ind";
                 SWRLArgument argRang = propAtom.getSecondArgument();
                 String rang = extractIRI(argRang);
+                String typerange = (argRang instanceof SWRLVariable) ? "var" : "ind";
 
                 HashMap<String, Object> assignments = new HashMap<>();
                 assignments.put("ruleid", ruleId);
                 assignments.put("domain", dom); 
                 assignments.put("prop", prop);
                 assignments.put("range", rang);
+                assignments.put("typedomain", typedomain);
+                assignments.put("typerange", typerange);
 
                 // Usaremos statementIncrementalInsert para que la columna de num se me vaya sumando sola
                 SimpleStatement query = rulesAntProp.statementIncrementalInsert(assignments);
@@ -80,7 +84,9 @@ public class LoaderSWRL extends LoaderManager {
             });
 
             head.forEach(atom -> {
+
                 HashMap<String, Object> assignments = new HashMap<>();
+
                 if (atom instanceof SWRLClassAtom) {
                     SWRLClassAtom classAtom = (SWRLClassAtom) atom;
                     String cls = classAtom.getPredicate().asOWLClass().getIRI().getIRIString();
@@ -98,13 +104,17 @@ public class LoaderSWRL extends LoaderManager {
                     String prop = propAtom.getPredicate().asOWLObjectProperty().getIRI().getIRIString();
                     SWRLArgument argDom = propAtom.getFirstArgument();
                     String dom = extractIRI(argDom);
+                    String typedomain = (argDom instanceof SWRLVariable) ? "var" : "ind";
                     SWRLArgument argRang = propAtom.getSecondArgument();
                     String rang = extractIRI(argRang);
+                    String typerange = (argRang instanceof SWRLVariable) ? "var" : "ind";
 
                     assignments.put("ruleid", ruleId);
                     assignments.put("domain", dom); 
                     assignments.put("prop", prop);
                     assignments.put("range", rang);
+                    assignments.put("typedomain", typedomain);
+                    assignments.put("typerange", typerange);
 
                     SimpleStatement query = rulesConsProp.statementIncrementalInsert(assignments);
                     collection.add(query);
