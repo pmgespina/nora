@@ -15,8 +15,7 @@ import reasoner.ReasonerManager;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 import scala.Tuple2;
-import scala.Tuple3;
-import table.impl.IsComplementOf;
+import scala.Tuple4;
 
 import static com.datastax.spark.connector.japi.CassandraJavaUtil.javaFunctions;
 
@@ -46,7 +45,8 @@ public class ReasonerSWRL extends ReasonerManager {
     @Override
     public List<Tuple2<String, String>> inference() {
         
-        // Tables
+        // Tables RulesAntProp and PropIndividuals
+
         JavaPairRDD<String, RulesAntProp.Row> rulesAntPropRDD = javaFunctions(spark)
                 .cassandraTable(connection.getDatabaseName(), "rulesantprop", CassandraJavaUtil.mapRowTo(RulesAntProp.Row.class))
                 .keyBy((Function<RulesAntProp.Row, String>) RulesAntProp.Row::getProp);
@@ -64,68 +64,64 @@ public class ReasonerSWRL extends ReasonerManager {
             propIndividualsRDD.foreach(data -> {
                 LOGGER.debug("PropIndividuals prop=" + data._1() + " row=" + data._2());
             });
-
-        JavaPairRDD<String, RulesConsProp.Row> rulesConsPropRDD = javaFunctions(spark)
-                .cassandraTable(connection.getDatabaseName(), "rulesconsprop", CassandraJavaUtil.mapRowTo(RulesConsProp.Row.class))
-                .keyBy((Function<RulesConsProp.Row, String>) RulesConsProp.Row::getProp);
-
-        if (LOGGER.isDebugEnabled())
-            rulesConsPropRDD.foreach(data -> {
-                LOGGER.debug("RulesConsProp prop=" + data._1() + " row=" + data._2());
-            });
         
-        JavaPairRDD<String, RulesConsClass.Row> rulesConsClassRDD = javaFunctions(spark)
-                .cassandraTable(connection.getDatabaseName(), "rulesconsclass", CassandraJavaUtil.mapRowTo(RulesConsClass.Row.class))
-                .keyBy((Function<RulesConsClass.Row, String>) RulesConsClass.Row::getCls);        
-
-        if (LOGGER.isDebugEnabled())
-            rulesConsClassRDD.foreach(data -> {
-                LOGGER.debug("RulesConsClass cls=" + data._1() + " row=" + data._2());
-            });
-        
-        // Joins
+        // Joins for antecedent part of SWRL rules
 
         // (prop=:P, (ruleid=1, num=0, ..., domain=?x, range=?y), (:Juan, :Maria))
         JavaPairRDD<String, Tuple2<RulesAntProp.Row, PropIndividuals.Row>> combinedRDD = 
                 rulesAntPropRDD.join(propIndividualsRDD);
 
-        // (:Maria, (prop=:P, ?y))
-        JavaPairRDD<String, Tuple2<String, String>> RDD1 = 
+        // (:Maria, (ruleid=1, num=0, prop=:P, range=?y))
+        JavaPairRDD<String, Tuple4<Integer, Integer, String, String>> RDD1 = 
                 combinedRDD.mapToPair(row -> {
                     Tuple2<RulesAntProp.Row, PropIndividuals.Row> tuple = row._2();
 
                     RulesAntProp.Row ruleRow = tuple._1();
                     PropIndividuals.Row individualsRow = tuple._2();
 
-                    return new Tuple2<>(individualsRow.getRange(), new Tuple2<>(ruleRow.getProp(), ruleRow.getRange()));
+                    return new Tuple2<>(individualsRow.getRange(), new Tuple4<>(ruleRow.getRuleId(), ruleRow.getNum(), ruleRow.getProp(), ruleRow.getRange()));
                 });
 
-        // (:Juan, (prop=:P, ?x))
-        JavaPairRDD<String, Tuple2<String, String>> RDD2 = 
+        // (:Juan, (ruleid=1, num=0, prop=:P, domain=?x))
+        JavaPairRDD<String, Tuple4<Integer, Integer, String, String>> RDD2 = 
                 combinedRDD.mapToPair(row -> {
                     Tuple2<RulesAntProp.Row, PropIndividuals.Row> tuple = row._2();
 
                     RulesAntProp.Row ruleRow = tuple._1();
                     PropIndividuals.Row individualsRow = tuple._2();
 
-                    return new Tuple2<>(individualsRow.getDomain(), new Tuple2<>(ruleRow.getProp(), ruleRow.getDomain()));
+                    return new Tuple2<>(individualsRow.getDomain(), new Tuple4<>(ruleRow.getRuleId(), ruleRow.getNum(), ruleRow.getProp(), ruleRow.getDomain()));
                 });
         
-        JavaPairRDD<String, Tuple2<String, String>> distinctRDD = RDD1.union(RDD2).distinct();
+        // (:Maria, (ruleid=1, num=0, prop=:P, range=?y), :Juan, (ruleid=1, num=0, prop=:P, domain=?x))
+        JavaPairRDD<String, Tuple4<Integer, Integer, String, String>> distinctRDD = RDD1.union(RDD2).distinct();
 
-        // Hacemos join mediante el prop de la tabla de individuos y la tabla de reglas
-        // Nos quedamos con la propiedad y los valores de los individuos en dominio y rango
-        // (http://www.semanticweb.org/nora/pruebas2#P, (http://www.semanticweb.org/nora/pruebas2#a, http://www.semanticweb.org/nora/pruebas2#b))
-        JavaPairRDD<String, Tuple2<String, String>> firstJoinRDD = 
-                rulesAntPropRDD.join(propIndividualsRDD)
-                .mapToPair(row -> {
-                    Tuple2<RulesAntProp.Row, PropIndividuals.Row> tuple = row._2();
+        // Tables RulesConsProp and RulesConsClass
 
-                    RulesAntProp.Row ruleRow = tuple._1();
-                    PropIndividuals.Row individualsRow = tuple._2();
+        JavaPairRDD<Integer, RulesConsProp.Row> rulesConsPropRDD = javaFunctions(spark)
+                .cassandraTable(connection.getDatabaseName(), "rulesconsprop", CassandraJavaUtil.mapRowTo(RulesConsProp.Row.class))
+                .keyBy((Function<RulesConsProp.Row, Integer>) RulesConsProp.Row::getRuleId);
 
-                    return new Tuple2<>(ruleRow.getProp(), new Tuple2<>(individualsRow.getDomain(), individualsRow.getRange()));
-                });
+        if (LOGGER.isDebugEnabled())
+            rulesConsPropRDD.foreach(data -> {
+                LOGGER.debug("RulesConsProp ruleid=" + data._1() + " row=" + data._2());
+            });
+        
+        JavaPairRDD<Integer, RulesConsClass.Row> rulesConsClassRDD = javaFunctions(spark)
+                .cassandraTable(connection.getDatabaseName(), "rulesconsclass", CassandraJavaUtil.mapRowTo(RulesConsClass.Row.class))
+                .keyBy((Function<RulesConsClass.Row, Integer>) RulesConsClass.Row::getRuleId);        
+
+        if (LOGGER.isDebugEnabled())
+            rulesConsClassRDD.foreach(data -> {
+                LOGGER.debug("RulesConsClass ruleid=" + data._1() + " row=" + data._2());
+            });
+
+
+        // Join RulesConsProp and RulesConsClass for properties and class inferences
+
+        JavaPairRDD<Integer, Tuple2<RulesConsProp.Row, RulesConsClass.Row>> rulesConsRDD = 
+                rulesConsPropRDD.join(rulesConsClassRDD);
+
 
         return null;
     }
