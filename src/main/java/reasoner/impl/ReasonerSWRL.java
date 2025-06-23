@@ -9,16 +9,15 @@ import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.function.Function;
 
 import com.datastax.spark.connector.japi.CassandraJavaUtil;
+import static com.datastax.spark.connector.japi.CassandraJavaUtil.javaFunctions;
 
 import database.Database;
 import reasoner.ReasonerManager;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 import scala.Tuple2;
+import scala.Tuple3;
 import scala.Tuple4;
-
-import static com.datastax.spark.connector.japi.CassandraJavaUtil.javaFunctions;
-
 import table.impl.PropIndividuals;
 import table.impl.RulesAntProp;
 import table.impl.RulesConsClass;
@@ -36,15 +35,51 @@ public class ReasonerSWRL extends ReasonerManager {
         super(connection, sc, pool);
     }
 
-    @Override
-    public Integer resolve(List<Tuple2<String, String>> inferences) {
-        // Implement SWRL resolution logic here
-        return 0; // Placeholder return value
+    public Integer resolveProp(List<Tuple3<String, String, String>> inferences) {
+        int totalNumberInferences = inferences.size();
+        int inferencesInserted = 0;
+
+        LOGGER.info("Found " + totalNumberInferences + " inferences for SWRLRules (property)");
+
+        for (Tuple3<String, String, String> tuple : inferences) {
+            String prop = tuple._1();
+            String domain = tuple._2();
+            String range = tuple._3();
+
+            try (Jedis cache = this.pool.getResource()) {
+                if (insertToPropIndividuals(prop, domain, range, cache))
+                    inferencesInserted++;
+            }
+        }
+
+        LOGGER.info(inferencesInserted + " new inferences inserted out of " + totalNumberInferences);
+
+        return inferencesInserted;
     }
 
-    @Override
-    public List<Tuple2<String, String>> inference() {
-        
+    public Integer resolveClass(List<Tuple2<String, String>> inferences) {
+        int totalNumberInferences = inferences.size();
+        int inferencesInserted = 0;
+
+        LOGGER.info("Found " + totalNumberInferences + " inferences for SWRLRules (class)");
+
+        for (Tuple2<String, String> tuple : inferences) {
+            String cls = tuple._1();
+            String ind = tuple._2();
+
+            try (Jedis cache = this.pool.getResource()) {
+                if (insertToClassIndividuals(cls, ind, cache))
+                    inferencesInserted++;
+            }
+        }
+
+        LOGGER.info(inferencesInserted + " new inferences inserted out of " + totalNumberInferences);
+
+        return inferencesInserted;
+    }
+
+    public List<Tuple3<String, String, String>> inferenceProp() {
+
         // Tables RulesAntProp and PropIndividuals
 
         JavaPairRDD<String, RulesAntProp.Row> rulesAntPropRDD = javaFunctions(spark)
@@ -67,11 +102,11 @@ public class ReasonerSWRL extends ReasonerManager {
         
         // Joins for antecedent part of SWRL rules
 
-        // (prop=:P, (ruleid=1, num=0, ..., domain=?x, range=?y), (:Juan, :Maria))
+        // (prop=:P, (ruleid=1, num=0, ..., domain=?x, range=?y), (domain=:Juan, range=:Maria))
         JavaPairRDD<String, Tuple2<RulesAntProp.Row, PropIndividuals.Row>> combinedRDD = 
                 rulesAntPropRDD.join(propIndividualsRDD);
 
-        // (:Maria, (ruleid=1, num=0, prop=:P, range=?y))
+        // (range=:Maria, (ruleid=1, num=0, prop=:P, range=?y))
         JavaPairRDD<String, Tuple4<Integer, Integer, String, String>> RDD1 = 
                 combinedRDD.mapToPair(row -> {
                     Tuple2<RulesAntProp.Row, PropIndividuals.Row> tuple = row._2();
@@ -82,7 +117,7 @@ public class ReasonerSWRL extends ReasonerManager {
                     return new Tuple2<>(individualsRow.getRange(), new Tuple4<>(ruleRow.getRuleId(), ruleRow.getNum(), ruleRow.getProp(), ruleRow.getRange()));
                 });
 
-        // (:Juan, (ruleid=1, num=0, prop=:P, domain=?x))
+        // (domain=:Juan, (ruleid=1, num=0, prop=:P, domain=?x))
         JavaPairRDD<String, Tuple4<Integer, Integer, String, String>> RDD2 = 
                 combinedRDD.mapToPair(row -> {
                     Tuple2<RulesAntProp.Row, PropIndividuals.Row> tuple = row._2();
@@ -93,10 +128,10 @@ public class ReasonerSWRL extends ReasonerManager {
                     return new Tuple2<>(individualsRow.getDomain(), new Tuple4<>(ruleRow.getRuleId(), ruleRow.getNum(), ruleRow.getProp(), ruleRow.getDomain()));
                 });
         
-        // (:Maria, (ruleid=1, num=0, prop=:P, range=?y), :Juan, (ruleid=1, num=0, prop=:P, domain=?x))
+        // (range=:Maria, (ruleid=1, num=0, prop=:P, range=?y), domain=:Juan, (ruleid=1, num=0, prop=:P, domain=?x))
         JavaPairRDD<String, Tuple4<Integer, Integer, String, String>> distinctRDD = RDD1.union(RDD2).distinct();
 
-        // Tables RulesConsProp and RulesConsClass
+        // Table RulesConsProp
 
         JavaPairRDD<Integer, RulesConsProp.Row> rulesConsPropRDD = javaFunctions(spark)
                 .cassandraTable(connection.getDatabaseName(), "rulesconsprop", CassandraJavaUtil.mapRowTo(RulesConsProp.Row.class))
@@ -106,7 +141,66 @@ public class ReasonerSWRL extends ReasonerManager {
             rulesConsPropRDD.foreach(data -> {
                 LOGGER.debug("RulesConsProp ruleid=" + data._1() + " row=" + data._2());
             });
+
+        // Change the key of distinctRDD to ruleId
+
+        // {(ruleid=1, (prop=:P, range=:Maria, range=?y)), (ruleid=1, (prop=:P, domain=:Juan, domain=?x))}
+        JavaPairRDD<Integer, Tuple3<String, String, String>> antecedentRuleIdKeyedRDD =
+            distinctRDD.mapToPair(row -> {
+                String individual = row._1();  // :Maria
+                Tuple4<Integer, Integer, String, String> data = row._2(); // (ruleid, num, prop, variable)
+                return new Tuple2<>(data._1(), new Tuple3<>(data._3(), individual, data._4())); // (prop, individual, variable)
+            });
+
+        // Join antecedent with consequent rules
+
+        // {(ruleid=1, (prop=:P, range=:Maria, range=?y), (ruleid=1, num=0, domain=?x, prop=P, range=?y))}
+        JavaPairRDD<Integer, Tuple2<Tuple3<String, String, String>, RulesConsProp.Row>> joinedConsPropRDD = antecedentRuleIdKeyedRDD
+                .join(rulesConsPropRDD)
+                .mapToPair(row -> {
+                    Tuple2<Tuple3<String, String, String>, RulesConsProp.Row> tuple = row._2(); 
+                    Tuple3<String, String, String> antecedent = tuple._1(); // (prop=:P, range=:Maria, range=?y)
+                    RulesConsProp.Row consequent = tuple._2(); // (ruleid=1, num=0, domain=?x, prop=P, range=?y)
+
+                    return new Tuple2<>(row._1(), new Tuple2<>(antecedent, consequent));
+                });
         
+        // Property inferences
+
+
+
+        // Result: (prop, domain, range)
+        return null;
+    }
+
+    public List<Tuple2<String, String>> inferenceClass() {
+        
+        // Tables RulesAntProp, PropIndividuals y RulesConsClass
+
+        JavaPairRDD<String, RulesAntProp.Row> rulesAntPropRDD = javaFunctions(spark)
+                .cassandraTable(connection.getDatabaseName(), "rulesantprop", CassandraJavaUtil.mapRowTo(RulesAntProp.Row.class))
+                .keyBy((Function<RulesAntProp.Row, String>) RulesAntProp.Row::getProp);
+
+        if (LOGGER.isDebugEnabled())
+            rulesAntPropRDD.foreach(data -> {
+                LOGGER.debug("RulesAntProp prop=" + data._1() + " row=" + data._2());
+            });
+
+        JavaPairRDD<String, PropIndividuals.Row> propIndividualsRDD = javaFunctions(spark)
+                .cassandraTable(connection.getDatabaseName(), "propindividuals", CassandraJavaUtil.mapRowTo(PropIndividuals.Row.class))
+                .keyBy((Function<PropIndividuals.Row, String>) PropIndividuals.Row::getProp);
+
+        if (LOGGER.isDebugEnabled())
+            propIndividualsRDD.foreach(data -> {
+                LOGGER.debug("PropIndividuals prop=" + data._1() + " row=" + data._2());
+            });
+            
+        // Join I
+
+        JavaPairRDD<String, Tuple2<RulesAntProp.Row, PropIndividuals.Row>> combinedRDD = rulesAntPropRDD.join(propIndividualsRDD);
+        
+        // Table RulesConsClass
+
         JavaPairRDD<Integer, RulesConsClass.Row> rulesConsClassRDD = javaFunctions(spark)
                 .cassandraTable(connection.getDatabaseName(), "rulesconsclass", CassandraJavaUtil.mapRowTo(RulesConsClass.Row.class))
                 .keyBy((Function<RulesConsClass.Row, Integer>) RulesConsClass.Row::getRuleId);        
@@ -116,13 +210,11 @@ public class ReasonerSWRL extends ReasonerManager {
                 LOGGER.debug("RulesConsClass ruleid=" + data._1() + " row=" + data._2());
             });
 
-
-        // Join RulesConsProp and RulesConsClass for properties and class inferences
-
-        JavaPairRDD<Integer, Tuple2<RulesConsProp.Row, RulesConsClass.Row>> rulesConsRDD = 
-                rulesConsPropRDD.join(rulesConsClassRDD);
+        // Join II
 
 
+
+        // Result: (class, individual)
         return null;
     }
 
