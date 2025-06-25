@@ -1,11 +1,12 @@
 package loader;
 
-import database.Configuration;
-import database.DBInitException;
-import database.impl.Cassandra;
-import loader.impl.*;
-import openllet.owlapi.OpenlletReasoner;
-import openllet.owlapi.OpenlletReasonerFactory;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.stream.Stream;
+
 import org.apache.log4j.Logger;
 import org.semanticweb.owlapi.apibinding.OWLManager;
 import org.semanticweb.owlapi.model.IRI;
@@ -15,12 +16,23 @@ import org.semanticweb.owlapi.model.OWLOntologyManager;
 import org.semanticweb.owlapi.model.parameters.Imports;
 import org.semanticweb.owlapi.util.SimpleIRIMapper;
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.stream.Stream;
+import database.Configuration;
+import database.DBInitException;
+import database.impl.Cassandra;
+import loader.impl.LoaderClassIndividuals;
+import loader.impl.LoaderDisjointClasses;
+import loader.impl.LoaderEquivalentClasses;
+import loader.impl.LoaderObjectPropertyDomains;
+import loader.impl.LoaderObjectPropertyEquivalentClasses;
+import loader.impl.LoaderObjectPropertyInverses;
+import loader.impl.LoaderObjectPropertyRanges;
+import loader.impl.LoaderObjectPropertySubProperties;
+import loader.impl.LoaderPropIndividuals;
+import loader.impl.LoaderSWRL;
+import loader.impl.LoaderSubClasses;
+import loader.impl.LoaderSupClasses;
+import openllet.owlapi.OpenlletReasoner;
+import openllet.owlapi.OpenlletReasonerFactory;
 
 public class Loader {
 
@@ -133,6 +145,9 @@ public class Loader {
           .loadOWLOntology(TBox)
           .forEach(connection::executeAsyncWithSession);
       new LoaderSupClasses(connection, manager, reasoner)
+          .loadOWLOntology(TBox)
+          .forEach(connection::executeAsyncWithSession);
+      new LoaderSWRL(connection, manager)
           .loadOWLOntology(TBox)
           .forEach(connection::executeAsyncWithSession);
     } catch (Exception e) {
