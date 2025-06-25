@@ -2,12 +2,13 @@ package loader.impl;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.apache.log4j.Logger;
-import org.semanticweb.owlapi.model.AxiomType;
 import org.semanticweb.owlapi.model.OWLOntology;
 import org.semanticweb.owlapi.model.OWLOntologyManager;
 import org.semanticweb.owlapi.model.SWRLArgument;
@@ -44,87 +45,150 @@ public class LoaderSWRL extends LoaderManager {
         return load(ontology, Imports.INCLUDED);
     }
 
+    public Stream<SimpleStatement> loadOWLOntology(OWLOntology ontology, Imports imports) {
+        return load(ontology, imports);
+    }
+
     private Stream<SimpleStatement> load(OWLOntology ontology, Imports imports) {
         Set<SimpleStatement> collection = new HashSet<>();
-
-        Stream<SWRLRule> rules = ontology.axioms(AxiomType.SWRL_RULE, imports);
-
         AtomicInteger ruleIdCounter = new AtomicInteger(1);
 
-        rules.forEach(rule -> {
+        ontology.axioms()
+            .filter(axiom -> axiom instanceof SWRLRule)
+            .map(axiom -> (SWRLRule) axiom)
+            .forEach(rule -> {
+                LOGGER.debug("Found SWRL rule " + rule);
+                int ruleId = ruleIdCounter.getAndIncrement();
 
-            int ruleId = ruleIdCounter.getAndIncrement();
-            LOGGER.debug("Found SWRL rule " + rule);
-        
-            Set<SWRLAtom> body = rule.getBody(); // Antecedente. Solo propiedades de objeto
-            Set<SWRLAtom> head = rule.getHead(); // Consecuente. Propiedades de objeto y de clase
+                Set<SWRLAtom> bodyAtoms = rule.body().collect(Collectors.toSet());
+                Set<SWRLAtom> headAtoms = rule.head().collect(Collectors.toSet());
 
-            body.forEach(atom -> {
-                // Como el tipo de atomo solo puede ser clausula de propiedad de objeto, asumimos que es asi
-                SWRLObjectPropertyAtom propAtom = (SWRLObjectPropertyAtom) atom;
-                String prop = propAtom.getPredicate().asOWLObjectProperty().getIRI().getIRIString();
-                SWRLArgument argDom = propAtom.getFirstArgument();
-                String dom = extractIRI(argDom);
-                String typedomain = (argDom instanceof SWRLVariable) ? "var" : "ind";
-                SWRLArgument argRang = propAtom.getSecondArgument();
-                String rang = extractIRI(argRang);
-                String typerange = (argRang instanceof SWRLVariable) ? "var" : "ind";
+                extractAndInsertValuesAnt(bodyAtoms, ruleId, collection);
+                extractAndInsertValuesCons(headAtoms, ruleId, collection);
 
-                HashMap<String, Object> assignments = new HashMap<>();
+            });
+
+        LOGGER.info("Found " + collection.size() + " SWRL statements to insert");
+
+        return collection.stream();    
+    }
+
+    private void extractAndInsertValuesAnt(Set<SWRLAtom> atoms, int ruleId, Set<SimpleStatement> collection) {
+        for (SWRLAtom atom : atoms) {
+            Map<String, Object> assignments = new HashMap<>();
+            assignments.put("ruleid", ruleId);
+            String prop = determineProp(atom);
+            String domain = extractDomain(atom);
+            String typedomain = determineTypeDomain(atom);
+            String range = extractRange(atom);
+            String typerange = determineTypeRange(atom);
+
+            if (prop != null || domain != null || range != null || typedomain != null || typerange != null) {
                 assignments.put("ruleid", ruleId);
-                assignments.put("domain", dom); 
+                assignments.put("domain", domain); 
                 assignments.put("prop", prop);
-                assignments.put("range", rang);
+                assignments.put("range", range);
                 assignments.put("typedomain", typedomain);
                 assignments.put("typerange", typerange);
 
                 // Usaremos statementIncrementalInsert para que la columna de num se me vaya sumando sola
                 SimpleStatement query = rulesAntProp.statementIncrementalInsert(assignments);
                 collection.add(query);
-            });
+            }
+        }
+    }
 
-            head.forEach(atom -> {
+    private void extractAndInsertValuesCons(Set<SWRLAtom> atoms, int ruleId, Set<SimpleStatement> collection) {
+        for (SWRLAtom atom : atoms) {
+            Map<String, Object> assignments = new HashMap<>();
+            assignments.put("ruleid", ruleId);
 
-                HashMap<String, Object> assignments = new HashMap<>();
+            if (atom instanceof SWRLClassAtom) {
+                String cls = determineCls(atom);
+                String var = determineVar(atom);
 
-                if (atom instanceof SWRLClassAtom) {
-                    SWRLClassAtom classAtom = (SWRLClassAtom) atom;
-                    String cls = classAtom.getPredicate().asOWLClass().getIRI().getIRIString();
-                    SWRLArgument argVar = classAtom.getArgument();
-                    String var = extractIRI(argVar);
-
-                    assignments.put("ruleid", ruleId);
+                if (cls != null || var != null) {
                     assignments.put("cls", cls);
                     assignments.put("var", var);
-
                     SimpleStatement query = rulesConsClass.statementIncrementalInsert(assignments);
                     collection.add(query);
-                } else if (atom instanceof SWRLObjectPropertyAtom) {
-                    SWRLObjectPropertyAtom propAtom = (SWRLObjectPropertyAtom) atom;
-                    String prop = propAtom.getPredicate().asOWLObjectProperty().getIRI().getIRIString();
-                    SWRLArgument argDom = propAtom.getFirstArgument();
-                    String dom = extractIRI(argDom);
-                    String typedomain = (argDom instanceof SWRLVariable) ? "var" : "ind";
-                    SWRLArgument argRang = propAtom.getSecondArgument();
-                    String rang = extractIRI(argRang);
-                    String typerange = (argRang instanceof SWRLVariable) ? "var" : "ind";
+                }
+            } else {
+                String prop = determineProp(atom);
+                String domain = extractDomain(atom);
+                String typedomain = determineTypeDomain(atom);
+                String range = extractRange(atom);
+                String typerange = determineTypeRange(atom);
 
+                if (prop != null || domain != null || range != null || typedomain != null || typerange != null) {
                     assignments.put("ruleid", ruleId);
-                    assignments.put("domain", dom); 
+                    assignments.put("domain", domain); 
                     assignments.put("prop", prop);
-                    assignments.put("range", rang);
+                    assignments.put("range", range);
                     assignments.put("typedomain", typedomain);
                     assignments.put("typerange", typerange);
 
+                    // Usaremos statementIncrementalInsert para que la columna de num se me vaya sumando sola
                     SimpleStatement query = rulesConsProp.statementIncrementalInsert(assignments);
                     collection.add(query);
                 }
-            });
-        });
+            }
+        }
+    }
 
-        LOGGER.info("Found " + collection.size() + " SWRL statements to insert");
+    private String determineTypeDomain(SWRLAtom atom) {
+        return (atom instanceof SWRLObjectPropertyAtom) ? "var" : "ind";
+    }
 
-        return collection.stream();    
+    private String determineTypeRange(SWRLAtom atom) {
+        return (atom instanceof SWRLObjectPropertyAtom) ? "var" : "ind";
+    }
+
+    private String extractDomain(SWRLAtom atom) {
+        if (atom instanceof SWRLObjectPropertyAtom) {
+            SWRLObjectPropertyAtom propAtom = (SWRLObjectPropertyAtom) atom;
+            SWRLArgument argDom = propAtom.getFirstArgument();
+            return extractIRI(argDom);
+        } else {
+            return null;
+        }
+    }
+
+    private String extractRange(SWRLAtom atom) {
+        if (atom instanceof SWRLObjectPropertyAtom) {
+            SWRLObjectPropertyAtom propAtom = (SWRLObjectPropertyAtom) atom;
+            SWRLArgument argRang = propAtom.getSecondArgument();
+            return extractIRI(argRang);
+        } else {
+            return null;
+        }
+    }
+
+    private String determineProp(SWRLAtom atom) {
+        if (atom instanceof SWRLObjectPropertyAtom) {
+            SWRLObjectPropertyAtom propAtom = (SWRLObjectPropertyAtom) atom;
+            return propAtom.getPredicate().asOWLObjectProperty().getIRI().getIRIString();
+        } else {
+            return null;
+        }
+    }
+
+    private String determineVar(SWRLAtom atom) {
+        if (atom instanceof SWRLClassAtom)  {
+            SWRLClassAtom classAtom = (SWRLClassAtom) atom;
+            SWRLArgument classArgument = classAtom.getArgument();
+            return extractIRI(classArgument);
+        } else {
+            return null;
+        }
+    }
+
+    private String determineCls(SWRLAtom atom) {
+        if (atom instanceof SWRLClassAtom) {
+            return ((SWRLClassAtom) atom).getPredicate().asOWLClass().getIRI().getIRIString();
+        } else {
+            return null;
+        }
     }
 
     @Override
@@ -139,6 +203,7 @@ public class LoaderSWRL extends LoaderManager {
         rulesConsProp.initialize();
     }
 
+    // Depending on the type of SWRLArgument, we extract the IRI in a different way
     private String extractIRI(SWRLArgument arg) {
         if (arg instanceof SWRLVariable) {
             return ((SWRLVariable) arg).getIRI().getIRIString();
@@ -153,5 +218,4 @@ public class LoaderSWRL extends LoaderManager {
         }
     }
                                           
-
 }
