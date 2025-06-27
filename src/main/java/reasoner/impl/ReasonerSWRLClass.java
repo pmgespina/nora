@@ -1,8 +1,9 @@
 package reasoner.impl;
 
+import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -13,6 +14,7 @@ import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.function.Function;
+import org.apache.spark.api.java.function.PairFlatMapFunction;
 
 import com.datastax.spark.connector.japi.CassandraJavaUtil;
 import static com.datastax.spark.connector.japi.CassandraJavaUtil.javaFunctions;
@@ -26,7 +28,7 @@ import table.impl.PropIndividuals;
 import table.impl.RulesAntProp;
 import table.impl.RulesConsClass;
 
-public class ReasonerSWRLClass extends ReasonerManager {
+public class ReasonerSWRLClass extends ReasonerManager implements Serializable {
 
     private final static Logger LOGGER = Logger.getLogger(ReasonerSWRLClass.class);
 
@@ -93,60 +95,65 @@ public class ReasonerSWRLClass extends ReasonerManager {
 
         JavaPairRDD<Integer, Iterable<Tuple2<RulesAntProp.Row, PropIndividuals.Row>>> atomsPerRule = ruleIdKeyedRDD.groupByKey();
 
-        JavaPairRDD<Integer, Tuple2<String, String>> groundedMatches = atomsPerRule.flatMapToPair(ruleTuple -> {
+        JavaPairRDD<Integer, Tuple2<String, String>> groundedMatches = atomsPerRule.flatMapToPair(new PairFlatMapFunction
+        <Tuple2<Integer, Iterable<Tuple2<RulesAntProp.Row, PropIndividuals.Row>>>,Integer,Tuple2<String, String>> () {
 
-            Integer ruleId = ruleTuple._1();
-            Iterable<Tuple2<RulesAntProp.Row, PropIndividuals.Row>> atomsIterable = ruleTuple._2();
+            @Override
+            public Iterator<Tuple2<Integer, Tuple2<String, String>>> call(
+                Tuple2<Integer, Iterable<Tuple2<RulesAntProp.Row, PropIndividuals.Row>>> ruleTuple) {
 
-            List<Tuple2<RulesAntProp.Row, PropIndividuals.Row>> atoms =
-                StreamSupport.stream(atomsIterable.spliterator(), false)
-                            .collect(Collectors.toList());
+                Integer ruleId = ruleTuple._1();
+                Iterable<Tuple2<RulesAntProp.Row, PropIndividuals.Row>> atomsIterable = ruleTuple._2();
 
-            // The first atom of the SWRL rule
-            Tuple2<RulesAntProp.Row, PropIndividuals.Row> firstAtom = atoms.get(0);
-            RulesAntProp.Row rule1 = firstAtom._1();
-            PropIndividuals.Row ind1 = firstAtom._2();
+                List<Tuple2<RulesAntProp.Row, PropIndividuals.Row>> atoms =
+                    StreamSupport.stream(atomsIterable.spliterator(), false)
+                        .collect(Collectors.toList());
 
-            List<Map<String, String>> prevBindings = new ArrayList<>();
-            Map<String, String> initialBinding = new HashMap<>();
-            initialBinding.put(rule1.getDomain(), ind1.getDomain());
-            initialBinding.put(rule1.getRange(), ind1.getRange());
-            prevBindings.add(initialBinding);
+                // Primer átomo
+                Tuple2<RulesAntProp.Row, PropIndividuals.Row> firstAtom = atoms.get(0);
+                RulesAntProp.Row rule1 = firstAtom._1();
+                PropIndividuals.Row ind1 = firstAtom._2();
 
-            // Next atoms
-            for (int i = 1; i < atoms.size(); i++) {
-                RulesAntProp.Row rule = atoms.get(i)._1();
-                PropIndividuals.Row ind = atoms.get(i)._2();
+                List<Map<String, String>> prevBindings = new ArrayList<>();
+                Map<String, String> initialBinding = new HashMap<>();
+                initialBinding.put(rule1.getDomain(), ind1.getDomain());
+                initialBinding.put(rule1.getRange(), ind1.getRange());
+                prevBindings.add(initialBinding);
 
-                String domainVariable = rule.getDomain();
-                String rangeVariable = rule.getRange();
-                String domainIndividual = ind.getDomain();
-                String rangeIndividual = ind.getRange();
+                for (int i = 1; i < atoms.size(); i++) {
+                    RulesAntProp.Row rule = atoms.get(i)._1();
+                    PropIndividuals.Row ind = atoms.get(i)._2();
 
-                List<Map<String, String>> nextBindings = new ArrayList<>();
+                    String domainVariable = rule.getDomain();
+                    String rangeVariable = rule.getRange();
+                    String domainIndividual = ind.getDomain();
+                    String rangeIndividual = ind.getRange();
 
-                for (Map<String, String> binding : prevBindings) {
-                    // We verify if the relationship between the domain and range variables is OK
-                    if (binding.containsKey(domainVariable) &&
-                        binding.get(domainVariable).equals(domainIndividual)) {
+                    List<Map<String, String>> nextBindings = new ArrayList<>();
 
-                        Map<String, String> extendedBinding = new HashMap<>(binding);
-                        extendedBinding.put(domainVariable, domainIndividual);
-                        extendedBinding.put(rangeVariable, rangeIndividual);
-                        nextBindings.add(extendedBinding);
+                    for (Map<String, String> binding : prevBindings) {
+                        if (binding.containsKey(domainVariable)
+                            && binding.get(domainVariable).equals(domainIndividual)) {
+
+                            Map<String, String> extendedBinding = new HashMap<>(binding);
+                            extendedBinding.put(domainVariable, domainIndividual);
+                            extendedBinding.put(rangeVariable, rangeIndividual);
+                            nextBindings.add(extendedBinding);
+                        }
                     }
+
+                    prevBindings = nextBindings;
                 }
 
-                prevBindings = nextBindings;
+                List<Tuple2<Integer, Tuple2<String, String>>> resultsWithRuleId = prevBindings.stream()
+                    .flatMap(binding -> binding.entrySet().stream())
+                    .map(entry -> new Tuple2<>(ruleId, new Tuple2<>(entry.getKey(), entry.getValue())))
+                    .collect(Collectors.toList());
+
+                return resultsWithRuleId.iterator();
             }
-
-            List<Tuple2<Integer, Tuple2<String, String>>> resultsWithRuleId = prevBindings.stream()
-                .flatMap(binding -> binding.entrySet().stream()
-                    .map(entry -> new Tuple2<>(ruleId, new Tuple2<>(entry.getKey(), entry.getValue()))))
-                .collect(Collectors.toList());
-
-            return resultsWithRuleId.iterator();
         });
+
 
         JavaPairRDD<Integer, RulesConsClass.Row> rulesConsClassRDD = javaFunctions(spark)
                 .cassandraTable(connection.getDatabaseName(), "rulesconsclass", CassandraJavaUtil.mapRowTo(RulesConsClass.Row.class))
@@ -170,15 +177,13 @@ public class ReasonerSWRLClass extends ReasonerManager {
         });
 
         JavaPairRDD<String, String> classIndividualPairs = filtered.mapToPair(tuple -> {
-            Tuple2<String, String> variablesIndividuals = tuple._2()._1();
+            Tuple2<String, String> assignment = tuple._2()._1();
             RulesConsClass.Row cons = tuple._2()._2();
 
-            String individual = variablesIndividuals._2();
-            String class = cons.getCls();
+            String individual = assignment._2();
+            String cls = cons.getCls();
 
-            Tuple2<String, String> classIndividual = new Tuple2<>(class, individual);
-
-            return classIndividual;
+            return new Tuple2<>(cls, individual);
         });
 
 
