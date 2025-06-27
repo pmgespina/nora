@@ -145,7 +145,7 @@ public class ReasonerSWRLObjectProperty extends ReasonerManager{
         
         // Property inferences
 
-        JavaPairRDD<String, Tuple3<String, String, String>> propertyInferencesRDD = joinedConsPropRDD
+        JavaPairRDD<String, Tuple2<String, String>> propertyInferencesRDD = joinedConsPropRDD
                 .mapToPair(row -> {
                     Tuple2<Tuple3<String, String, String>, RulesConsProp.Row> tuple = row._2();
                     Tuple3<String, String, String> antecedent = tuple._1(); // (prop=:P, range=:Maria, range=?y)
@@ -155,11 +155,16 @@ public class ReasonerSWRLObjectProperty extends ReasonerManager{
                     String domain = consequent.getDomain();
                     String range = antecedent._2();
 
-                    return new Tuple2<>(prop, new Tuple3<>(domain, range, antecedent._3()));
+                    return new Tuple2<>(prop, new Tuple2<>(domain, range));
                 });
 
+        List<Tuple3<String, String, String>> inferences = propertyInferencesRDD
+            .map(tuple -> new Tuple3<>(tuple._1(), tuple._2()._1(), tuple._2()._2()))
+            .collect();
+
+
         // Result: (prop, domain, range)
-        return null;
+        return inferences;
     }
 
 }
