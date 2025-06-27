@@ -105,9 +105,23 @@ public class ReasonerSWRLObjectProperty extends ReasonerManager{
 
                     return new Tuple2<>(individualsRow.getDomain(), new Tuple4<>(ruleRow.getRuleId(), ruleRow.getNum(), ruleRow.getProp(), ruleRow.getDomain()));
                 });
+
+        // RDD de range: (ruleid, (rangeIndividual, ?y))
+        JavaPairRDD<Integer, Tuple2<String, String>> rangeRDD = RDD1.mapToPair(row -> {
+            Tuple4<Integer, Integer, String, String> data = row._2();  // (ruleid, num, prop, ?y)
+            return new Tuple2<>(data._1(), new Tuple2<>(row._1(), data._4()));  // (:Maria, ?y)
+        });
+
+        // RDD de domain: (ruleid, (domainIndividual, ?x))
+        JavaPairRDD<Integer, Tuple2<String, String>> domainRDD = RDD2.mapToPair(row -> {
+            Tuple4<Integer, Integer, String, String> data = row._2();  // (ruleid, num, prop, ?x)
+            return new Tuple2<>(data._1(), new Tuple2<>(row._1(), data._4()));  // (:Juan, ?x)
+        });
+
         
-        // (range=:Maria, (ruleid=1, num=0, prop=:P, range=?y), domain=:Juan, (ruleid=1, num=0, prop=:P, domain=?x))
-        JavaPairRDD<String, Tuple4<Integer, Integer, String, String>> distinctRDD = RDD1.union(RDD2).distinct();
+        JavaPairRDD<Integer, Tuple2<Tuple2<String, String>, Tuple2<String, String>>> antecedentsRDD =
+            rangeRDD.join(domainRDD);
+
 
         // Table RulesConsProp
 
@@ -120,48 +134,40 @@ public class ReasonerSWRLObjectProperty extends ReasonerManager{
                 LOGGER.debug("RulesConsProp ruleid=" + data._1() + " row=" + data._2());
             });
 
-        // Change the key of distinctRDD to ruleId
-
-        // {(ruleid=1, (prop=:P, range=:Maria, range=?y)), (ruleid=1, (prop=:P, domain=:Juan, domain=?x))}
-        JavaPairRDD<Integer, Tuple3<String, String, String>> antecedentRuleIdKeyedRDD =
-            distinctRDD.mapToPair(row -> {
-                String individual = row._1();  // :Maria
-                Tuple4<Integer, Integer, String, String> data = row._2(); // (ruleid, num, prop, variable)
-                return new Tuple2<>(data._1(), new Tuple3<>(data._3(), individual, data._4())); // (prop, individual, variable)
-            });
-
         // Join antecedent with consequent rules
 
-        // {(ruleid=1, (prop=:P, range=:Maria, range=?y), (ruleid=1, num=0, domain=?x, prop=P, range=?y))}
-        JavaPairRDD<Integer, Tuple2<Tuple3<String, String, String>, RulesConsProp.Row>> joinedConsPropRDD = antecedentRuleIdKeyedRDD
-                .join(rulesConsPropRDD)
-                .mapToPair(row -> {
-                    Tuple2<Tuple3<String, String, String>, RulesConsProp.Row> tuple = row._2(); 
-                    Tuple3<String, String, String> antecedent = tuple._1(); // (prop=:P, range=:Maria, range=?y)
-                    RulesConsProp.Row consequent = tuple._2(); // (ruleid=1, num=0, domain=?x, prop=P, range=?y)
+        // {(ruleid=1, (range=:Maria, range=?y), (domain=:Juan, domain=?x) (ruleid=1, num=0, domain=?x, prop=P, range=?y))}
+        JavaPairRDD<Integer, Tuple3<Tuple2<String, String>, Tuple2<String, String>, RulesConsProp.Row>> joinedConsPropRDD = antecedentsRDD
+            .join(rulesConsPropRDD)
+            .mapToPair(row -> {
+                Integer ruleId = row._1();
+                Tuple2<Tuple2<String, String>, Tuple2<String, String>> antecedent = row._2()._1();  // ((:Maria, ?y), (:Juan, ?x))
+                RulesConsProp.Row consequent = row._2()._2();
 
-                    return new Tuple2<>(row._1(), new Tuple2<>(antecedent, consequent));
-                });
+                return new Tuple2<>(ruleId, new Tuple3<>(antecedent._1(), antecedent._2(), consequent));
+            });
+
         
         // Property inferences
 
         JavaPairRDD<String, Tuple2<String, String>> propertyInferencesRDD = joinedConsPropRDD
-                .mapToPair(row -> {
-                    Tuple2<Tuple3<String, String, String>, RulesConsProp.Row> tuple = row._2();
-                    Tuple3<String, String, String> antecedent = tuple._1(); // (prop=:P, range=:Maria, range=?y)
-                    RulesConsProp.Row consequent = tuple._2(); // (ruleid=1, num=0, domain=?x, prop=P, range=?y)
+            .mapToPair(row -> {
+                Tuple3<Tuple2<String, String>, Tuple2<String, String>, RulesConsProp.Row> tuple = row._2();
 
-                    String prop = consequent.getProp();
-                    String domain = consequent.getDomain();
-                    String range = antecedent._2();
+                Tuple2<String, String> rangeData = tuple._1();   // (:Maria, ?y)
+                Tuple2<String, String> domainData = tuple._2();  // (:Juan, ?x)
+                RulesConsProp.Row consequent = tuple._3();
 
-                    return new Tuple2<>(prop, new Tuple2<>(domain, range));
-                });
+                String prop = consequent.getProp();
+                String domain = domainData._1();
+                String range = rangeData._1();
+
+                return new Tuple2<>(prop, new Tuple2<>(domain, range));
+            });
 
         List<Tuple3<String, String, String>> inferences = propertyInferencesRDD
             .map(tuple -> new Tuple3<>(tuple._1(), tuple._2()._1(), tuple._2()._2()))
             .collect();
-
 
         // Result: (prop, domain, range)
         return inferences;
